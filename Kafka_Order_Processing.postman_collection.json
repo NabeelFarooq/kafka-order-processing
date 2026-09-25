@@ -1,0 +1,160 @@
+{
+  "info": {
+    "name": "Kafka Order Processing System",
+    "description": "Order Service: POST /orders (port 8080). Delivery Service: PUT /deliveries/{orderId}/status (port 8082). Events flow through Kafka: order-created, payment-success, payment-failed, delivery-created, delivery-out-for-delivery, order-delivered. Duplicate-event and DLT demos use the Kafka CLI (see README). The outbox publishers run every 5 s, so allow ~10-15 s for the full flow.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "orderServiceUrl", "value": "http://localhost:8080" },
+    { "key": "deliveryServiceUrl", "value": "http://localhost:8082" },
+    { "key": "orderId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Order Service",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', function () { pm.response.to.have.status(201); });",
+              "pm.test('Response has orderId and status CREATED', function () {",
+              "  var body = pm.response.json();",
+              "  pm.expect(body).to.have.property('orderId');",
+              "  pm.expect(body.status).to.eql('CREATED');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "1. Create Order - Success (customer 101)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('orderId', pm.response.json().orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": 101,\n  \"customerName\": \"Rahul\",\n  \"productId\": 501,\n  \"productName\": \"Laptop\",\n  \"quantity\": 1,\n  \"amount\": 75000,\n  \"deliveryAddress\": \"Bangalore\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{orderServiceUrl}}/orders", "host": ["{{orderServiceUrl}}"], "path": ["orders"] },
+            "description": "ORDER_CREATED -> PAYMENT_SUCCESS -> DELIVERY_CREATED -> SMS notifications. Saves the returned orderId in the orderId variable used by the delivery-status requests."
+          }
+        },
+        {
+          "name": "2. Create Order - Payment failure (customer 102)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": 102,\n  \"customerName\": \"Anita\",\n  \"productId\": 502,\n  \"productName\": \"Smartphone\",\n  \"quantity\": 1,\n  \"amount\": 45000,\n  \"deliveryAddress\": \"Bangalore\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{orderServiceUrl}}/orders", "host": ["{{orderServiceUrl}}"], "path": ["orders"] },
+            "description": "Customer 102 is configured to fail payment (payment.demo.failure-customer-id=102): ORDER_CREATED -> PAYMENT_FAILED (INSUFFICIENT_FUNDS) -> failure SMS -> order CANCELLED."
+          }
+        },
+        {
+          "name": "3. Create Order - Failure & retry demo (customer 103)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": 103,\n  \"customerName\": \"Kiran\",\n  \"productId\": 503,\n  \"productName\": \"Tablet\",\n  \"quantity\": 1,\n  \"amount\": 75000,\n  \"deliveryAddress\": \"Bangalore\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{orderServiceUrl}}/orders", "host": ["{{orderServiceUrl}}"], "path": ["orders"] },
+            "description": "Stop Payment Service, send this request, wait ~5 s, check consumer lag (payment-service-group), then restart Payment Service and verify the order is processed."
+          }
+        },
+        {
+          "name": "4. Create Order - Partition demo (Runner x10)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerId\": {{$randomInt}},\n  \"customerName\": \"{{$randomFirstName}}\",\n  \"productId\": 501,\n  \"productName\": \"Laptop\",\n  \"quantity\": 1,\n  \"amount\": 75000,\n  \"deliveryAddress\": \"Bangalore\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{orderServiceUrl}}/orders", "host": ["{{orderServiceUrl}}"], "path": ["orders"] },
+            "description": "Run with the Collection Runner (10 iterations), then inspect key / partition / offset on the order-created topic."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Delivery Service - status updates",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK - status updated', function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "5. Delivery status - IN_TRANSIT",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{deliveryServiceUrl}}/deliveries/{{orderId}}/status?status=IN_TRANSIT",
+              "host": ["{{deliveryServiceUrl}}"],
+              "path": ["deliveries", "{{orderId}}", "status"],
+              "query": [{ "key": "status", "value": "IN_TRANSIT" }]
+            },
+            "description": "Uses the orderId saved by request 1. Wait ~10-15 s after request 1 so the delivery exists. No Kafka event is published for IN_TRANSIT."
+          }
+        },
+        {
+          "name": "6. Delivery status - OUT_FOR_DELIVERY",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{deliveryServiceUrl}}/deliveries/{{orderId}}/status?status=OUT_FOR_DELIVERY",
+              "host": ["{{deliveryServiceUrl}}"],
+              "path": ["deliveries", "{{orderId}}", "status"],
+              "query": [{ "key": "status", "value": "OUT_FOR_DELIVERY" }]
+            },
+            "description": "Publishes DELIVERY_OUT_FOR_DELIVERY to delivery-out-for-delivery; Notification Service sends the SMS."
+          }
+        },
+        {
+          "name": "7. Delivery status - DELIVERED",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{deliveryServiceUrl}}/deliveries/{{orderId}}/status?status=DELIVERED",
+              "host": ["{{deliveryServiceUrl}}"],
+              "path": ["deliveries", "{{orderId}}", "status"],
+              "query": [{ "key": "status", "value": "DELIVERED" }]
+            },
+            "description": "Publishes ORDER_DELIVERED to order-delivered; Notification Service sends the SMS and Order Service sets the order status to DELIVERED."
+          }
+        }
+      ]
+    }
+  ]
+}
